@@ -1,0 +1,27 @@
+name: live_random
+description: Random live video matching - 100% anonymous
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  agora_rtc_engine: ^6.3.2
+  socket_io_client: ^2.0.3+1
+  flutter_riverpod: ^2.5.1
+  flutter_animate: ^4.5.0
+  google_fonts: ^6.2.1
+  permission_handler: ^11.3.1
+  uuid: ^4.4.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
