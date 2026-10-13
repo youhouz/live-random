@@ -1,18 +1,24 @@
 const express = require('express');
-const http = require('http');
+const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
-const server = http.createServer(app);
+app.use(cors({ origin: '*' }));
+
+// Pour Vercel on exporte le handler
+const server = createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" },
-  transports: ['websocket']
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  },
+  transports: ['websocket', 'polling'],
+  path: '/socket.io'
 });
 
-// === MÉMOIRE UNIQUEMENT - AUCUNE BASE DE DONNÉES ===
+// === MÉMOIRE (attention: limité sur Vercel car multi-instances) ===
 let waiting = [];
 const rooms = new Map();
 
@@ -65,7 +71,6 @@ io.on('connection', (socket) => {
 
   socket.on('next', () => {
     leaveRoom(socket);
-    // Relance la recherche
     socket.emit('find');
   });
 
@@ -90,7 +95,18 @@ io.on('connection', (socket) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🔥 Serveur anonyme live lancé → port ${PORT}`);
+// Route de test
+app.get('/', (req, res) => {
+  res.send('Live Random Server is running on Vercel 🚀');
 });
+
+// Export pour Vercel
+module.exports = app;
+
+// Pour le développement local
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`Serveur local sur le port ${PORT}`);
+  });
+}
