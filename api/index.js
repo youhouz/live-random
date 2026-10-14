@@ -2,105 +2,110 @@ const express = require('express');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
+const { Redis } = require('@upstash/redis');
 
 const app = express();
 app.use(cors({ origin: '*' }));
 
-// Mémoire (limité sur Vercel)
-let waiting = [];
-const rooms = new Map();
+// Redis partagé (obligatoire pour Vercel)
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+const WAITING_KEY = 'live:waiting';
 
 function randomPseudo() {
   const prefixes = ["Night", "Void", "Neon", "Shadow", "Frost", "Blaze", "Echo", "Nova", "Ghost", "Pulse"];
   const suffixes = ["Wolf", "Fox", "Raven", "Viper", "Storm", "Blade", "Drift", "Spark", "Haze", "Zero"];
-  return prefixes[Math.floor(Math.random() * prefixes.length)] + 
-         suffixes[Math.floor(Math.random() * suffixes.length)] + 
+  return prefixes[Math.floor(Math.random() * prefixes.length)] +
+         suffixes[Math.floor(Math.random() * suffixes.length)] +
          Math.floor(Math.random() * 90 + 10);
 }
 
-// On attache Socket.io seulement une fois
-let io;
+let io = null;
 
-function getIO(server) {
-  if (!io) {
-    io = new Server(server, {
-      cors: { origin: '*', methods: ['GET', 'POST'] },
-      transports: ['websocket', 'polling'],
-      path: '/socket.io'
-    });
+function initIO(server) {
+  if (io) return io;
 
-    io.on('connection', (socket) => {
-      let currentRoom = null;
-      let myPseudo = randomPseudo();
+  io = new Server(server, {
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+    transports: ['websocket', 'polling'],
+    path: '/socket.io'
+  });
 
-      socket.emit('pseudo', myPseudo);
+  io.on('connection', (socket) => {
+    let myPseudo = randomPseudo();
+    let currentRoom = null;
 
-      socket.on('find', () => {
-        waiting = waiting.filter(u => u.id !== socket.id);
+    socket.emit('pseudo', myPseudo);
 
-        if (waiting.length > 0) {
-          const partner = waiting.shift();
+    socket.on('find', async () => {
+      try {
+        // Retire de la file s'il y était
+        await redis.lrem(WAITING_KEY, 0, socket.id);
+
+        // Essaie de prendre quelqu'un en attente
+        const partnerId = await redis.lpop(WAITING_KEY);
+
+        if (partnerId) {
           const roomId = uuidv4();
-
           currentRoom = roomId;
-          partner.currentRoom = roomId;
 
-          rooms.set(roomId, {
-            users: [socket.id, partner.id]
-          });
-
-          socket.join(roomId);
-          partner.join(roomId);
-
+          // Informe les deux
           socket.emit('matched', {
             roomId,
-            partnerPseudo: partner.pseudo || 'Anonymous'
+            partnerPseudo: 'Anonymous'
           });
 
-          partner.emit('matched', {
+          // On essaie d'émettre à l'autre (si sur la même instance)
+          io.to(partnerId).emit('matched', {
             roomId,
             partnerPseudo: myPseudo
           });
+
+          // Stocke la room temporairement
+          await redis.set(`room:${roomId}`, JSON.stringify([socket.id, partnerId]), { ex: 300 });
+
         } else {
-          socket.pseudo = myPseudo;
-          waiting.push(socket);
+          // Personne → on se met en file
+          await redis.rpush(WAITING_KEY, socket.id);
+          await redis.expire(WAITING_KEY, 60); // expire après 60s
           socket.emit('waiting');
         }
-      });
-
-      socket.on('next', () => {
-        if (currentRoom) {
-          socket.to(currentRoom).emit('partner_left');
-          rooms.delete(currentRoom);
-          socket.leave(currentRoom);
-          currentRoom = null;
-        }
-        socket.emit('find');
-      });
-
-      socket.on('disconnect', () => {
-        waiting = waiting.filter(u => u.id !== socket.id);
-        if (currentRoom) {
-          socket.to(currentRoom).emit('partner_left');
-          rooms.delete(currentRoom);
-        }
-      });
+      } catch (err) {
+        console.error(err);
+        socket.emit('waiting');
+      }
     });
-  }
+
+    socket.on('next', async () => {
+      if (currentRoom) {
+        await redis.del(`room:${currentRoom}`);
+        currentRoom = null;
+      }
+      socket.emit('find');
+    });
+
+    socket.on('disconnect', async () => {
+      await redis.lrem(WAITING_KEY, 0, socket.id);
+      if (currentRoom) {
+        await redis.del(`room:${currentRoom}`);
+      }
+    });
+  });
+
   return io;
 }
 
 app.get('/', (req, res) => {
-  res.send('Live Random Server is running on Vercel 🚀\n\nMatching is limited due to serverless architecture.');
+  res.send('Live Random Server running on Vercel + Upstash Redis');
 });
 
-// Handler principal pour Vercel
 module.exports = (req, res) => {
-  // Pour les upgrades WebSocket, on a besoin du serveur sous-jacent
-  // Cette approche a des limitations sur Vercel
+  // Note: Socket.io sur Vercel reste limité (durée + instances)
+  // Mais avec Redis la file d\'attente est partagée
   const server = require('http').createServer(app);
-  getIO(server);
-  
-  // Passe la requête à Express
+  initIO(server);
   app(req, res);
 };
